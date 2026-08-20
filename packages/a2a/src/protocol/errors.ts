@@ -1,13 +1,4 @@
-export type A2AErrorCode =
-  | "CAPABILITY_DISCOVERY_FAILED"
-  | "CAPABILITY_NOT_SUPPORTED"
-  | "INVALID_CAPABILITY_MANIFEST"
-  | "INVALID_REQUEST"
-  | "INVALID_RESPONSE"
-  | "SCHEMA_VALIDATION_FAILED"
-  | "INJECTION_DETECTED"
-  | "REQUEST_TIMEOUT"
-  | "EXTERNAL_AGENT_ERROR";
+import type { A2AErrorCode } from "../types/index.js";
 
 export class A2AError extends Error {
   constructor(

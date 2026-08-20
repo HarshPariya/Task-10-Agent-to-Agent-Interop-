@@ -26,166 +26,205 @@ interface CliOptions {
   maxRetries: number;
 }
 
-function parseArgs(args: readonly string[]): CliOptions {
-  const values = new Map<string, string>();
+const AGENT_NAMES = new Set<AgentName>([
+  "honest",
+  "capability-lying",
+  "injection",
+]);
 
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
+const AGENT_FACTORY: Record<
+  AgentName,
+  () => HonestAgent | CapabilityLyingAgent | InjectionAgent
+> = {
+  honest: () => new HonestAgent(),
+  "capability-lying": () => new CapabilityLyingAgent(),
+  injection: () => new InjectionAgent(),
+};
 
-    if (!argument?.startsWith("--")) {
-      continue;
-    }
+const sanitize = (value: string | undefined): string =>
+  value?.trim().replace(/[\x00-\x1f\x7f-\x9f]/g, "") ?? "";
 
-    const key = argument.slice(2);
-    const inlineSeparator = key.indexOf("=");
+type Validator<T> = (input: string | undefined) => T;
 
-    if (inlineSeparator >= 0) {
-      const name = key.slice(0, inlineSeparator);
-      const value = key.slice(inlineSeparator + 1).trim();
+const intValidator =
+  (
+    fallback: number,
+    min: number,
+    max: number,
+    name: string,
+  ): Validator<number> =>
+  (raw) =>
+    raw === undefined
+      ? fallback
+      : (() => {
+          const input = raw;
+          const value = Number(input);
+          return Number.isInteger(value) && value >= min && value <= max
+            ? value
+            : (() => {
+                throw new A2AError(
+                  "INVALID_REQUEST",
+                  `Invalid ${name} "${input}". Must be integer ${min}-${max}.`,
+                );
+              })();
+        })();
 
-      if (!name || !value) {
-        throw new A2AError(
-          "INVALID_REQUEST",
-          `Invalid argument "${argument}".`,
-        );
-      }
+const requiredValidator =
+  (message: string): Validator<string> =>
+  (raw) => {
+    const trimmed = raw?.trim() ?? "";
+    return trimmed
+      ? trimmed
+      : (() => {
+          throw new A2AError("INVALID_REQUEST", message);
+        })();
+  };
 
-      values.set(name, value);
-      continue;
-    }
+const maxLengthValidator =
+  (max: number, name: string): Validator<string> =>
+  (value) =>
+    value === undefined
+      ? (() => {
+          throw new A2AError("INVALID_REQUEST", `${name} is required.`);
+        })()
+      : value.length <= max
+        ? value
+        : (() => {
+            throw new A2AError(
+              "INVALID_REQUEST",
+              `${name} exceeds maximum length of ${max} characters.`,
+            );
+          })();
 
-    const value = args[index + 1];
+const enumValidator =
+  <T extends string>(allowed: Set<T>, name: string): Validator<T> =>
+  (raw) =>
+    allowed.has(raw as T)
+      ? (raw as T)
+      : (() => {
+          throw new A2AError(
+            "INVALID_REQUEST",
+            `Unknown ${name} "${raw}". Use ${[...allowed].join(", ")}.`,
+          );
+        })();
 
-    if (!value || value.startsWith("--")) {
-      throw new A2AError("INVALID_REQUEST", `Missing value for --${key}.`);
-    }
+const optionalValidator =
+  <T>(fallback: T, transform: (raw: string) => T): Validator<T> =>
+  (raw) =>
+    raw !== undefined ? transform(raw) : fallback;
 
-    values.set(key, value.trim());
-    index += 1;
+const parseArgs = (args: readonly string[]): CliOptions => {
+  const raw = new Map<string, string>();
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    arg?.startsWith("--")
+      ? (() => {
+          const eqIndex = arg.indexOf("=");
+          return eqIndex > 2
+            ? (() => {
+                const key = arg.slice(2, eqIndex);
+                const value = arg.slice(eqIndex + 1).trim();
+                return key && value
+                  ? raw.set(key, value)
+                  : (() => {
+                      throw new A2AError(
+                        "INVALID_REQUEST",
+                        `Invalid argument "${arg}".`,
+                      );
+                    })();
+              })()
+            : (() => {
+                const key = arg.slice(2);
+                const value = args[i + 1];
+                return value && !value.startsWith("--")
+                  ? (raw.set(key, value.trim()), (i++, undefined))
+                  : (() => {
+                      throw new A2AError(
+                        "INVALID_REQUEST",
+                        `Missing value for --${key}.`,
+                      );
+                    })();
+              })();
+        })()
+      : undefined;
   }
 
-  const task = sanitizeInput(values.get("task"));
+  const get = (key: string, fallback?: string): string | undefined =>
+    raw.get(key) ?? fallback;
 
-  if (!task) {
-    throw new A2AError(
-      "INVALID_REQUEST",
-      'The --task argument is required. Example: --task "verify this claim".',
-    );
-  }
-
-  if (task.length > MAX_TASK_LENGTH) {
-    throw new A2AError(
-      "INVALID_REQUEST",
-      `Task exceeds maximum length of ${MAX_TASK_LENGTH} characters.`,
-    );
-  }
-
-  const agentValue = values.get("agent") ?? DEFAULT_AGENT;
-
-  if (!AGENT_NAMES.has(agentValue)) {
-    throw new A2AError(
-      "INVALID_REQUEST",
-      `Unknown agent "${agentValue}". Use honest, capability-lying, or injection.`,
-    );
-  }
-
-  const capability = sanitizeInput(
-    values.get("capability") ?? DEFAULT_CAPABILITY,
+  const taskRequired = requiredValidator(
+    'The --task argument is required. Example: --task "verify this claim".',
   );
-
-  if (!capability.trim()) {
-    throw new A2AError(
-      "INVALID_REQUEST",
-      "The --capability argument cannot be empty.",
-    );
-  }
-
-  const host = sanitizeInput(values.get("host") ?? DEFAULT_HOST);
-
-  const port = parseNumber(
-    values.get("port"),
-    DEFAULT_PORT,
-    { min: 1, max: 65_535 },
-    "port",
-    "Port must be an integer between 1 and 65535.",
-  );
-
-  const timeoutMs = parseNumber(
-    values.get("timeout"),
-    3_000,
-    { min: 100, max: 60_000 },
-    "timeout",
-    "Timeout must be an integer between 100 and 60000ms.",
-  );
-
-  const maxRetries = parseNumber(
-    values.get("retries"),
-    2,
-    { min: 0, max: 10 },
-    "retries",
-    "Retries must be an integer between 0 and 10.",
-  );
+  const taskMaxLength = maxLengthValidator(MAX_TASK_LENGTH, "Task");
+  const taskValidator: Validator<string> = (raw) =>
+    taskMaxLength(taskRequired(raw));
 
   return {
-    agent: agentValue as AgentName,
-    capability: capability.trim(),
-    task,
-    host,
-    port,
-    timeoutMs,
-    maxRetries,
+    task: taskValidator(get("task")),
+    agent: enumValidator(AGENT_NAMES, "agent")(get("agent", DEFAULT_AGENT)),
+    capability: requiredValidator("The --capability argument cannot be empty.")(
+      get("capability", DEFAULT_CAPABILITY),
+    ),
+    host: optionalValidator(DEFAULT_HOST, sanitize)(get("host", DEFAULT_HOST)),
+    port: intValidator(
+      DEFAULT_PORT,
+      1,
+      65_535,
+      "port",
+    )(get("port", String(DEFAULT_PORT))),
+    timeoutMs: intValidator(
+      3_000,
+      100,
+      60_000,
+      "timeout",
+    )(get("timeout", "3000")),
+    maxRetries: intValidator(2, 0, 10, "retries")(get("retries", "2")),
   };
-}
+};
 
-const AGENT_NAMES = new Set(["honest", "capability-lying", "injection"]);
+const createAgent = (agentName: AgentName) => AGENT_FACTORY[agentName]();
 
-function parseNumber(
-  raw: string | undefined,
-  fallback: number,
-  range: { min: number; max: number },
-  name: string,
-  hint: string,
-): number {
-  if (raw === undefined) return fallback;
+const formatResult = (
+  options: CliOptions,
+  result: Awaited<ReturnType<DelegationService["delegate"]>>,
+): string => {
+  const base = [
+    "",
+    "Task 10 — A2A Delegation",
+    "=".repeat(50),
+    `Agent      : ${options.agent}`,
+    `Task       : ${options.task}`,
+    `Capability : ${options.capability}@${CAPABILITY_VERSION}`,
+    `Status     : ${result.accepted ? "ACCEPTED" : "REJECTED"}`,
+  ];
 
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < range.min || value > range.max) {
-    throw new A2AError("INVALID_REQUEST", `Invalid ${name} "${raw}". ${hint}`);
-  }
-
-  return value;
-}
-
-function sanitizeInput(value: string | undefined): string {
-  return value?.trim().replace(/[\x00-\x1f\x7f-\x9f]/g, "") ?? "";
-}
-
-function createAgent(agentName: AgentName) {
-  const agents: Record<
-    AgentName,
-    () => HonestAgent | CapabilityLyingAgent | InjectionAgent
-  > = {
-    honest: () => new HonestAgent(),
-    "capability-lying": () => new CapabilityLyingAgent(),
-    injection: () => new InjectionAgent(),
-  };
-
-  return agents[agentName]();
-}
+  return result.accepted
+    ? [
+        ...base,
+        "",
+        "Verified Result",
+        "-".repeat(50),
+        JSON.stringify(result.data, null, 2),
+      ].join("\n")
+    : [
+        ...base,
+        "",
+        "Delegation rejected.",
+        `Reason     : ${result.reason ?? "Unknown verification failure."}`,
+      ].join("\n");
+};
 
 async function run(options: CliOptions): Promise<void> {
   const agent = createAgent(options.agent);
-
   const server = new ExternalAgentServer(agent, {
     host: options.host,
     port: options.port,
   });
-
   await server.start();
 
   try {
     const delegationService = new DelegationService();
-
     const result = await delegationService.delegate<unknown>({
       agentUrl: `http://${options.host}:${options.port}`,
       capability: options.capability,
@@ -194,38 +233,10 @@ async function run(options: CliOptions): Promise<void> {
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries,
     });
-
-    printResult(options, result);
+    console.log(formatResult(options, result));
   } finally {
     await server.stop();
   }
-}
-
-function printResult(
-  options: CliOptions,
-  result: Awaited<ReturnType<DelegationService["delegate"]>>,
-): void {
-  console.log("");
-  console.log("Task 10 — A2A Delegation");
-  console.log("=".repeat(50));
-  console.log(`Agent      : ${options.agent}`);
-  console.log(`Task       : ${options.task}`);
-  console.log(`Capability : ${options.capability}@${CAPABILITY_VERSION}`);
-  console.log(`Status     : ${result.accepted ? "ACCEPTED" : "REJECTED"}`);
-
-  if (result.accepted) {
-    console.log("");
-    console.log("Verified Result");
-    console.log("-".repeat(50));
-    console.log(JSON.stringify(result.data, null, 2));
-    return;
-  }
-
-  console.log("");
-  console.log("Delegation rejected.");
-  console.log(
-    `Reason     : ${result.reason ?? "Unknown verification failure."}`,
-  );
 }
 
 async function main(): Promise<void> {
@@ -239,7 +250,6 @@ async function main(): Promise<void> {
         : error instanceof Error
           ? error.message
           : "Unexpected CLI error.";
-
     console.error(`A2A CLI error: ${message}`);
     process.exitCode = 1;
   }

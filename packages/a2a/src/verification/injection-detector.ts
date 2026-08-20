@@ -1,14 +1,9 @@
-export interface InjectionDetectionResult {
-  detected: boolean;
-  matches: string[];
-}
+import type {
+  InjectionDetectionResult,
+  InjectionPattern,
+} from "../types/index.js";
 
-interface InjectionPattern {
-  name: string;
-  pattern: RegExp;
-}
-
-const INJECTION_PATTERNS: readonly InjectionPattern[] = [
+export const INJECTION_PATTERNS: readonly InjectionPattern[] = [
   {
     name: "instruction-override",
     pattern:
@@ -30,25 +25,33 @@ const INJECTION_PATTERNS: readonly InjectionPattern[] = [
   },
 ];
 
+const isString = (value: unknown): value is string => typeof value === "string";
+const isArray = Array.isArray;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !isArray(value);
+
+const extractStrings = (value: unknown): string[] =>
+  isString(value)
+    ? [value]
+    : isArray(value)
+      ? value.flatMap(extractStrings)
+      : isRecord(value)
+        ? Object.values(value).flatMap(extractStrings)
+        : [];
+
 export class InjectionDetector {
-  detect(value: unknown): InjectionDetectionResult {
-    const texts = this.collectText(value);
+  private readonly patterns: readonly InjectionPattern[];
 
-    const matches = INJECTION_PATTERNS.filter((rule) =>
-      texts.some((text) => rule.pattern.test(text)),
-    ).map((rule) => rule.name);
-
-    return { detected: matches.length > 0, matches };
+  constructor(patterns: readonly InjectionPattern[] = INJECTION_PATTERNS) {
+    this.patterns = patterns;
   }
 
-  private collectText(value: unknown, acc: string[] = []): string[] {
-    if (typeof value === "string") {
-      acc.push(value);
-    } else if (Array.isArray(value)) {
-      value.forEach((item) => this.collectText(item, acc));
-    } else if (value && typeof value === "object") {
-      Object.values(value).forEach((item) => this.collectText(item, acc));
-    }
-    return acc;
+  detect(value: unknown): InjectionDetectionResult {
+    const texts = extractStrings(value);
+    const matches = this.patterns
+      .filter((rule) => texts.some((text) => rule.pattern.test(text)))
+      .map((rule) => rule.name);
+
+    return { detected: matches.length > 0, matches };
   }
 }

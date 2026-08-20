@@ -22,6 +22,3 @@ export const handoffResponseSchema = z.object({
     })
     .optional(),
 });
-
-export type HandoffRequest = z.infer<typeof handoffRequestSchema>;
-export type HandoffResponse = z.infer<typeof handoffResponseSchema>;

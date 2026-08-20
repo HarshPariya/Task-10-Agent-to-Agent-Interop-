@@ -1,51 +1,90 @@
 import { CapabilityClient } from "../client/capability-client.js";
 import { HandoffClient } from "../client/handoff-client.js";
-import { A2AError } from "../protocol/errors.js";
 import { ResponseVerifier } from "../verification/response-verifier.js";
+import { A2AError } from "../protocol/errors.js";
+import type {
+  Capability,
+  HandoffResponse,
+  DelegationOptions,
+  DelegationResult,
+  DelegationServiceDependencies,
+  VerificationResult,
+} from "../types/client.js";
 
-export interface DelegationOptions {
-  agentUrl: string;
-  capability: string;
-  capabilityVersion: string;
-  task: string;
-  timeoutMs?: number;
-  maxRetries?: number;
-}
+const DEFAULT_DEPENDENCIES: DelegationServiceDependencies = {
+  verifier: new ResponseVerifier(),
+  capabilityClientCtor: CapabilityClient,
+  handoffClientCtor: HandoffClient,
+};
 
-export interface DelegationResult<T> {
-  accepted: boolean;
-  data?: T;
-  reason?: string;
-}
+const DEFAULT_TIMEOUT_MS = 3_000;
+const DEFAULT_MAX_RETRIES = 2;
+
+const STATUS_HANDLERS: Record<
+  HandoffResponse["status"],
+  (r: HandoffResponse) => DelegationResult<never>
+> = {
+  success: () => ({ accepted: true as const, data: undefined as never }),
+  rejected: (r) => ({
+    accepted: false as const,
+    reason: r.error?.message ?? "Agent rejected the handoff request.",
+  }),
+  error: (r) => ({
+    accepted: false as const,
+    reason: r.error?.message ?? "Agent returned an error response.",
+  }),
+};
+
+const ensureOutputSchema = (
+  capability: Capability,
+  name: string,
+  version: string,
+): void =>
+  capability.outputSchema
+    ? undefined
+    : (() => {
+        throw new A2AError(
+          "INVALID_CAPABILITY_MANIFEST",
+          `Capability "${name}@${version}" has no output schema.`,
+        );
+      })();
+
+const resolveVerification = <T>(
+  verification: VerificationResult<T>,
+): DelegationResult<T> =>
+  !verification.accepted
+    ? { accepted: false, reason: verification.reason ?? "Verification failed." }
+    : verification.data !== undefined
+      ? { accepted: true, data: verification.data }
+      : { accepted: false, reason: "Verified response contains no data." };
 
 export class DelegationService {
-  private readonly verifier: ResponseVerifier;
+  private readonly deps: DelegationServiceDependencies;
 
-  constructor(verifier = new ResponseVerifier()) {
-    this.verifier = verifier;
+  constructor(deps: Partial<DelegationServiceDependencies> = {}) {
+    this.deps = { ...DEFAULT_DEPENDENCIES, ...deps };
   }
 
   async delegate<T>(options: DelegationOptions): Promise<DelegationResult<T>> {
     const clientOptions = {
       baseUrl: options.agentUrl,
-      timeoutMs: options.timeoutMs ?? 3000,
-      maxRetries: options.maxRetries ?? 2,
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      maxRetries: options.maxRetries ?? DEFAULT_MAX_RETRIES,
     };
 
-    const capabilityClient = new CapabilityClient(clientOptions);
-    const handoffClient = new HandoffClient(clientOptions);
+    const capabilityClient = new this.deps.capabilityClientCtor(clientOptions);
+    const handoffClient = new this.deps.handoffClientCtor(clientOptions);
 
     const capability = await capabilityClient.requireCapability(
       options.capability,
       options.capabilityVersion,
     );
 
-    if (!capability.outputSchema) {
-      throw new A2AError(
-        "INVALID_CAPABILITY_MANIFEST",
-        `Capability "${options.capability}@${options.capabilityVersion}" has no output schema.`,
-      );
-    }
+    ensureOutputSchema(
+      capability,
+      options.capability,
+      options.capabilityVersion,
+    );
 
     const response = await handoffClient.handoff({
       capability: options.capability,
@@ -53,22 +92,15 @@ export class DelegationService {
       task: options.task,
     });
 
-    const verification = this.verifier.verify<T>(
-      response.result,
-      capability.outputSchema,
-    );
-
-    if (!verification.accepted) {
-      return {
-        accepted: false,
-        reason: verification.reason ?? "Verification failed.",
-      };
-    }
-
-    if (verification.data === undefined) {
-      return { accepted: false, reason: "Verified response contains no data." };
-    }
-
-    return { accepted: true, data: verification.data };
+    const statusHandler = STATUS_HANDLERS[response.status];
+    const statusResult = statusHandler(response);
+    return statusResult.accepted === false
+      ? (statusResult as DelegationResult<T>)
+      : resolveVerification(
+          this.deps.verifier.verify<T>(
+            response.result,
+            capability.outputSchema!,
+          ),
+        );
   }
 }
