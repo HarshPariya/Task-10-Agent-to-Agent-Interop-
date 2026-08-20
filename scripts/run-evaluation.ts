@@ -55,7 +55,7 @@ function createAgent(type: GoldenScenario["agent"]) {
 }
 
 function getPort(index: number): number {
-  return BASE_PORT + index;
+  return BASE_PORT + index + Math.floor(Math.random() * 100);
 }
 
 async function loadScenarios(): Promise<GoldenScenario[]> {

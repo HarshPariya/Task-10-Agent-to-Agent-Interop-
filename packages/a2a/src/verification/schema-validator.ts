@@ -1,131 +1,84 @@
-import { A2AError, type A2AErrorCode } from "../protocol/errors.js";
+import { A2AError } from "../protocol/errors.js";
+import type {
+  A2AErrorCode,
+  SchemaValidationResult,
+  SchemaType,
+  SchemaProperty,
+} from "../types/verification.js";
 
-export interface SchemaValidationResult<T> {
-  valid: boolean;
-  data?: T;
-  error?: A2AError;
-}
+type CheckResult =
+  | { readonly valid: true }
+  | { readonly valid: false; readonly error: string };
+const OK: CheckResult = { valid: true };
+const fail = (error: string): CheckResult => ({ valid: false, error });
 
-interface SchemaProperty {
-  type: "object" | "array" | "string" | "number" | "boolean";
-  enum?: unknown[];
-  minimum?: number;
-  maximum?: number;
-  items?: SchemaProperty;
-  required?: string[];
-  properties?: Record<string, SchemaProperty>;
-}
+const firstError = (checks: CheckResult[]): CheckResult =>
+  checks.find((r) => !r.valid) ?? OK;
 
-function parseSchema(text: string): SchemaProperty | null {
+const parseSchema = (text: string): SchemaProperty | null => {
   try {
-    return JSON.parse(text) as SchemaProperty;
+    const parsed = JSON.parse(text) as SchemaProperty;
+    return parsed.type === "object" ? parsed : null;
   } catch {
     return null;
   }
-}
+};
 
-type CheckResult = { valid: boolean; error?: string };
-type CheckFn = () => CheckResult;
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 
-const firstError = (checks: CheckResult[]): CheckResult =>
-  checks.find((r) => !r.valid) ?? { valid: true };
+const validateObject = (value: unknown, schema: SchemaProperty): CheckResult =>
+  !isObject(value)
+    ? fail("Expected object")
+    : firstError(
+        Object.entries(schema.properties ?? {}).flatMap(([key, propSchema]) => [
+          !(key in value) && (schema.required ?? []).includes(key)
+            ? fail(`Missing required property: ${key}`)
+            : OK,
+          key in value ? validateValue(value[key], propSchema) : OK,
+        ]),
+      );
 
-const runChecks = (...checks: CheckFn[]): CheckResult =>
-  firstError(checks.map((fn) => fn()));
+const validateArray = (value: unknown, schema: SchemaProperty): CheckResult =>
+  !Array.isArray(value)
+    ? fail("Expected array")
+    : schema.items
+      ? firstError(
+          (value as unknown[]).map((item, i) => {
+            const r = validateValue(item, schema.items!);
+            return r.valid ? OK : fail(`[${i}]: ${r.error}`);
+          }),
+        )
+      : OK;
 
-function validateObject(value: unknown, schema: SchemaProperty): CheckResult {
-  const typeCheck: CheckFn = () =>
-    typeof value === "object" && value !== null
-      ? { valid: true }
-      : { valid: false, error: "Expected object" };
+const validateString = (value: unknown, schema: SchemaProperty): CheckResult =>
+  typeof value !== "string"
+    ? fail("Expected string")
+    : schema.enum && !schema.enum.includes(value)
+      ? fail(`Value not in enum: ${schema.enum.join(", ")}`)
+      : OK;
 
-  const obj = value as Record<string, unknown>;
-  const props = schema.properties ?? {};
-  const required = schema.required ?? [];
+const validateNumber = (
+  value: unknown,
+  schema: SchemaProperty,
+): CheckResult => {
+  const num = typeof value === "number" && !Number.isNaN(value) ? value : NaN;
+  return Number.isNaN(num)
+    ? fail("Expected number")
+    : schema.minimum !== undefined && num < schema.minimum
+      ? fail(`Value below minimum: ${schema.minimum}`)
+      : schema.maximum !== undefined && num > schema.maximum
+        ? fail(`Value above maximum: ${schema.maximum}`)
+        : OK;
+};
 
-  const propChecks = Object.entries(props).flatMap(
-    ([key, propSchema]): CheckFn[] => {
-      const missing = !(key in obj);
-      const requiredCheck: CheckFn = () =>
-        missing && required.includes(key)
-          ? { valid: false, error: `Missing required property: ${key}` }
-          : { valid: true };
-
-      const valueCheck: CheckFn = () =>
-        missing ? { valid: true } : validateValue(obj[key], propSchema);
-
-      return [requiredCheck, valueCheck];
-    },
-  );
-
-  return runChecks(typeCheck, ...propChecks);
-}
-
-function validateArray(value: unknown, schema: SchemaProperty): CheckResult {
-  const typeCheck: CheckFn = () =>
-    Array.isArray(value)
-      ? { valid: true }
-      : { valid: false, error: "Expected array" };
-
-  const itemsCheck: CheckFn = () => {
-    if (!schema.items) return { valid: true };
-    const checks = (value as unknown[]).map((item, i): CheckResult => {
-      const result = validateValue(item, schema.items!);
-      return result.valid
-        ? { valid: true }
-        : { valid: false, error: `[${i}]: ${result.error}` };
-    });
-    return firstError(checks);
-  };
-
-  return runChecks(typeCheck, itemsCheck);
-}
-
-function validateString(value: unknown, schema: SchemaProperty): CheckResult {
-  return runChecks(
-    () =>
-      typeof value === "string"
-        ? { valid: true }
-        : { valid: false, error: "Expected string" },
-    () =>
-      schema.enum && !schema.enum.includes(value)
-        ? {
-            valid: false,
-            error: `Value not in enum: ${schema.enum.join(", ")}`,
-          }
-        : { valid: true },
-  );
-}
-
-function validateNumber(value: unknown, schema: SchemaProperty): CheckResult {
-  const num =
-    typeof value === "number" && !Number.isNaN(value) ? (value as number) : NaN;
-  return runChecks(
-    () =>
-      Number.isNaN(num)
-        ? { valid: false, error: "Expected number" }
-        : { valid: true },
-    () =>
-      schema.minimum !== undefined && num < schema.minimum
-        ? { valid: false, error: `Value below minimum: ${schema.minimum}` }
-        : { valid: true },
-    () =>
-      schema.maximum !== undefined && num > schema.maximum
-        ? { valid: false, error: `Value above maximum: ${schema.maximum}` }
-        : { valid: true },
-  );
-}
-
-function validateBoolean(value: unknown): CheckResult {
-  return runChecks(() =>
-    typeof value === "boolean"
-      ? { valid: true }
-      : { valid: false, error: "Expected boolean" },
-  );
-}
+const validateBoolean = (
+  _value: unknown,
+  _schema: SchemaProperty,
+): CheckResult => (typeof _value === "boolean" ? OK : fail("Expected boolean"));
 
 const VALIDATORS: Record<
-  SchemaProperty["type"],
+  SchemaType,
   (value: unknown, schema: SchemaProperty) => CheckResult
 > = {
   object: validateObject,
@@ -135,51 +88,38 @@ const VALIDATORS: Record<
   boolean: validateBoolean,
 };
 
-function validateValue(value: unknown, schema: SchemaProperty): CheckResult {
+const validateValue = (value: unknown, schema: SchemaProperty): CheckResult => {
   const validator = VALIDATORS[schema.type];
   return validator
     ? validator(value, schema)
-    : { valid: false, error: `Unsupported type: ${schema.type}` };
-}
+    : fail(`Unsupported type: ${schema.type}`);
+};
 
 export class SchemaValidator {
   private readonly schemaCache = new Map<string, SchemaProperty>();
 
   validate<T>(value: unknown, schemaText: string): SchemaValidationResult<T> {
     const schema = this.getSchema(schemaText);
-
-    if (!schema) {
-      return this.error(
-        "INVALID_RESPONSE",
-        "External agent declared an invalid output schema.",
-      );
-    }
-
-    if (schema.type !== "object") {
-      return this.error("INVALID_RESPONSE", "Root schema must be an object");
-    }
-
-    const result = validateValue(value, schema);
-    return result.valid
-      ? { valid: true, data: value as T }
-      : this.error(
-          "SCHEMA_VALIDATION_FAILED",
-          result.error ?? "Validation failed",
-        );
+    return schema
+      ? (() => {
+          const result = validateValue(value, schema);
+          return result.valid
+            ? { valid: true, data: value as T }
+            : this.createError("SCHEMA_VALIDATION_FAILED", result.error);
+        })()
+      : this.createError("INVALID_RESPONSE", "Invalid output schema declared.");
   }
 
   private getSchema(schemaText: string): SchemaProperty | null {
-    const cached = this.schemaCache.get(schemaText);
-    if (cached) return cached;
-
-    const parsed = parseSchema(schemaText);
-    if (!parsed || parsed.type !== "object") return null;
-
-    this.schemaCache.set(schemaText, parsed);
-    return parsed;
+    return this.schemaCache.get(schemaText) ?? this.parseAndCache(schemaText);
   }
 
-  private error(
+  private parseAndCache(schemaText: string): SchemaProperty | null {
+    const parsed = parseSchema(schemaText);
+    return parsed ? (this.schemaCache.set(schemaText, parsed), parsed) : null;
+  }
+
+  private createError(
     code: A2AErrorCode,
     message: string,
   ): SchemaValidationResult<never> {

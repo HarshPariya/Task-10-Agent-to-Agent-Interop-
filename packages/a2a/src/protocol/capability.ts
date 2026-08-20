@@ -17,14 +17,13 @@ export const capabilityManifestSchema = z.object({
   capabilities: z.array(capabilitySchema).min(1),
 });
 
-export type Capability = z.infer<typeof capabilitySchema>;
-export type CapabilityManifest = z.infer<typeof capabilityManifestSchema>;
-
 export function findCapability(
-  manifest: CapabilityManifest,
+  manifest: {
+    readonly capabilities: readonly z.infer<typeof capabilitySchema>[];
+  },
   capabilityName: string,
   capabilityVersion: string,
-): Capability | undefined {
+): z.infer<typeof capabilitySchema> | undefined {
   return manifest.capabilities.find(
     (capability) =>
       capability.name === capabilityName &&

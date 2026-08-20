@@ -1,28 +1,32 @@
-import {
-  PROTOCOL_VERSION,
-  type CapabilityManifest,
-} from "../protocol/capability.js";
-import {
-  type HandoffRequest,
-  type HandoffResponse,
-} from "../protocol/handoff.js";
+import { PROTOCOL_VERSION } from "../protocol/capability.js";
 import { A2AError } from "../protocol/errors.js";
-
-export interface HandoffClientOptions {
-  baseUrl: string;
-  timeoutMs: number;
-  headers?: Record<string, string>;
-  maxRetries?: number;
-}
-
-export interface HandoffOptions {
-  capability: string;
-  capabilityVersion: string;
-  task: string;
-}
+import type {
+  CapabilityManifest,
+  HandoffRequest,
+  HandoffResponse,
+  HandoffClientOptions,
+  HandoffOptions,
+} from "../types/client.js";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
 const DEFAULT_MAX_RETRIES = 2;
+
+type ErrorClassifier = (err: unknown) => A2AError | null;
+
+const CLASSIFIERS: readonly ErrorClassifier[] = [
+  (err) => (err instanceof A2AError ? err : null),
+  (err) =>
+    err instanceof DOMException && err.name === "AbortError"
+      ? new A2AError("REQUEST_TIMEOUT", "Request timed out.")
+      : null,
+];
+
+const classifyError = (err: unknown): A2AError =>
+  CLASSIFIERS.reduce((acc, c) => acc ?? c(err), null as A2AError | null) ??
+  new A2AError("EXTERNAL_AGENT_ERROR", "Request failed.", err);
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 export class HandoffClient {
   private readonly baseUrl: string;
@@ -38,9 +42,8 @@ export class HandoffClient {
   }
 
   async getCapabilities(): Promise<CapabilityManifest> {
-    return this.request("/capabilities", { method: "GET" }).then(
-      (r) => r.json() as Promise<CapabilityManifest>,
-    );
+    const { response } = await this.request("/capabilities", { method: "GET" });
+    return response.json() as Promise<CapabilityManifest>;
   }
 
   async handoff(options: HandoffOptions): Promise<HandoffResponse> {
@@ -60,9 +63,12 @@ export class HandoffClient {
     });
   }
 
-  private async request(path: string, init: RequestInit): Promise<Response> {
+  private async request(
+    path: string,
+    init: RequestInit,
+  ): Promise<{ response: Response; isAgentError: boolean }> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
@@ -70,23 +76,37 @@ export class HandoffClient {
         signal: controller.signal,
       });
 
-      if (!response.ok) {
-        throw new A2AError("EXTERNAL_AGENT_ERROR", `HTTP ${response.status}.`);
-      }
+      const isAgentError =
+        response.status === 500 &&
+        init.method === "POST" &&
+        path === "/handoff";
 
-      return response;
+      const errorBody =
+        response.ok || isAgentError
+          ? undefined
+          : await this.parseErrorBody(response);
+
+      return response.ok || isAgentError
+        ? { response, isAgentError }
+        : (() => {
+            throw new A2AError(
+              "EXTERNAL_AGENT_ERROR",
+              `HTTP ${response.status}`,
+              errorBody,
+            );
+          })();
     } catch (err) {
-      if (err instanceof A2AError) throw err;
-      if (err instanceof DOMException && err.name === "AbortError") {
-        throw new A2AError(
-          "EXTERNAL_AGENT_ERROR",
-          `Request timed out after ${this.timeoutMs}ms.`,
-          err,
-        );
-      }
-      throw new A2AError("EXTERNAL_AGENT_ERROR", "Request failed.", err);
+      throw classifyError(err);
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timer);
+    }
+  }
+
+  private async parseErrorBody(response: Response): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch {
+      return undefined;
     }
   }
 
@@ -94,23 +114,22 @@ export class HandoffClient {
     path: string,
     init: RequestInit,
   ): Promise<HandoffResponse> {
+    const attempts = this.maxRetries + 1;
     let lastError: Error | null = null;
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       try {
-        const response = await this.request(path, init);
-        return response.json() as Promise<HandoffResponse>;
+        const { response } = await this.request(path, init);
+        return (await response.json()) as HandoffResponse;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        if (attempt < this.maxRetries) {
-          await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
-        }
+        await delay(100 * (attempt + 1));
       }
     }
 
     throw new A2AError(
       "EXTERNAL_AGENT_ERROR",
-      `Failed after ${this.maxRetries + 1} attempts.`,
+      `Failed after ${attempts} attempts.`,
       lastError,
     );
   }
