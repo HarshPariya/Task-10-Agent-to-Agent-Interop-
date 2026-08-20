@@ -1,0 +1,10 @@
+{"id":"honest-01","agent":"honest","capability":"claim-verification","capabilityVersion":"1.0.0","task":"the earth orbits the sun","expectedAccepted":true,"expectedStatus":"success"}
+{"id":"honest-02","agent":"honest","capability":"claim-verification","capabilityVersion":"1.0.0","task":"water freezes at 0 degrees celsius at standard pressure","expectedAccepted":true,"expectedStatus":"success"}
+{"id":"honest-03","agent":"honest","capability":"claim-verification","capabilityVersion":"1.0.0","task":"the sun orbits the earth","expectedAccepted":true,"expectedStatus":"success"}
+{"id":"honest-04","agent":"honest","capability":"claim-verification","capabilityVersion":"1.0.0","task":"unknown claim about the dataset","expectedAccepted":true,"expectedStatus":"success"}
+{"id":"honest-05","agent":"honest","capability":"claim-verification","capabilityVersion":"1.0.0","task":"the earth orbits the sun","expectedAccepted":true,"expectedStatus":"success"}
+{"id":"honest-06","agent":"honest","capability":"claim-verification","capabilityVersion":"1.0.0","task":"water freezes at 0 degrees celsius at standard pressure","expectedAccepted":true,"expectedStatus":"success"}
+{"id":"lying-01","agent":"capability-lying","capability":"claim-verification","capabilityVersion":"1.0.0","task":"the earth orbits the sun","expectedAccepted":false,"expectedStatus":"rejected"}
+{"id":"lying-02","agent":"capability-lying","capability":"unsupported-capability","capabilityVersion":"1.0.0","task":"verify this unsupported capability","expectedAccepted":false,"expectedStatus":"rejected"}
+{"id":"injection-01","agent":"injection","capability":"claim-verification","capabilityVersion":"1.0.0","task":"the earth orbits the sun","expectedAccepted":false,"expectedStatus":"rejected"}
+{"id":"injection-02","agent":"injection","capability":"claim-verification","capabilityVersion":"1.0.0","task":"verify this claim safely","expectedAccepted":false,"expectedStatus":"rejected"}

@@ -1,0 +1,20 @@
+{
+  "name": "task-10-agent-to-agent-interop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Task 10 - Agent-to-Agent Interoperability Across Trust Boundaries",
+  "type": "module",
+  "packageManager": "pnpm@10.14.0",
+  "scripts": {
+    "a2a": "tsx scripts/a2a-cli.ts",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "eval": "pnpm --filter @task-10/a2a eval",
+    "review": "tsx scripts/run-review-gate.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.9.2"
+  }
+}
